@@ -162,7 +162,7 @@ class ConstantLengthDataset(IterableDataset):
         dataset,
         infinite=False,
         seq_length=1024,
-        num_of_sequences=1024,
+        num_of_sequences=512,
         chars_per_token=3.6,
         content_field="content",
         fim_rate=0.5,
@@ -172,10 +172,13 @@ class ConstantLengthDataset(IterableDataset):
     ):
         self.tokenizer = tokenizer
         self.concat_token_id = tokenizer.eos_token_id
+        self.eot_token_id = tokenizer.encode(tokenizer.eot_token, add_special_tokens=False)[0]
+        print(f"eot_token_id: {self.eot_token_id}")
         self.dataset = dataset
         self.seq_length = seq_length
         self.infinite = infinite
         self.current_size = 0
+        self.chars_per_token = chars_per_token
         self.max_buffer_size = seq_length * chars_per_token * num_of_sequences
         self.content_field = content_field
         self.fim_rate = fim_rate
@@ -204,8 +207,26 @@ class ConstantLengthDataset(IterableDataset):
                 if buffer_len >= self.max_buffer_size:
                     break
                 try:
-                    buffer.append(next(iterator)[self.content_field])
-                    buffer_len += len(buffer[-1])
+                    document = next(iterator)[self.content_field]
+
+                    old_num_chunks = len(buffer)
+
+                    chunk_num = 0
+
+                    while len(document) > 0:
+                        old_document_len = len(document)
+                        chunk_len = np_rng.randint(3072 * self.chars_per_token, (self.seq_length - 1024) * self.chars_per_token)
+                        buffer.append(document[:chunk_len])
+                        document = document[chunk_len:]
+                        chunk_num += 1
+                        buffer_len += len(buffer[-1])
+                        if chunk_num % 50 == 0:
+                            print(f"Chunked {old_document_len-len(document)} characters from document of length {old_document_len}. Chunk number {chunk_num}.")
+                            if buffer_len >= self.max_buffer_size:
+                                break
+
+                    print(f"Chunked document into {len(buffer) - old_num_chunks} chunks. Total chunks: {len(buffer)}.")
+                    
                 except StopIteration:
                     if self.infinite:
                         iterator = iter(self.dataset)
@@ -233,7 +254,7 @@ class ConstantLengthDataset(IterableDataset):
                         bos_token_id=self.bos_token_id,
                     )
 
-                all_token_ids.extend(tokenized_input + [self.concat_token_id])
+                all_token_ids.extend(tokenized_input + [self.eot_token_id, self.concat_token_id])
             examples = []
             for i in range(0, len(all_token_ids), self.seq_length):
                 input_ids = all_token_ids[i : i + self.seq_length]
@@ -243,6 +264,10 @@ class ConstantLengthDataset(IterableDataset):
                 random.shuffle(examples)
             for example in examples:
                 self.current_size += 1
+
+                print(f"Yielding example {self.current_size}.")
+                print(self.tokenizer.decode(example))
+                
                 yield {
                     "input_ids": torch.LongTensor(example),
                     "labels": torch.LongTensor(example),
