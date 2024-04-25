@@ -39,7 +39,12 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, replace_lora_weights_loftq
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+    replace_lora_weights_loftq,
+)
 import fim
 
 
@@ -106,7 +111,9 @@ class ModelArguments:
     )
     use_loftq_callback: Optional[bool] = field(
         default=False,
-        metadata={"help": "Enables LoftQ callback comparing logits of base model to the ones from LoftQ init. Provides better init."},
+        metadata={
+            "help": "Enables LoftQ callback comparing logits of base model to the ones from LoftQ init. Provides better init."
+        },
     )
 
 
@@ -172,7 +179,9 @@ class ConstantLengthDataset(IterableDataset):
     ):
         self.tokenizer = tokenizer
         self.concat_token_id = tokenizer.eos_token_id
-        self.eot_token_id = tokenizer.encode(tokenizer.eot_token, add_special_tokens=False)[0]
+        self.eot_token_id = tokenizer.encode(
+            tokenizer.eot_token, add_special_tokens=False
+        )[0]
         print(f"eot_token_id: {self.eot_token_id}")
         self.dataset = dataset
         self.seq_length = seq_length
@@ -215,18 +224,25 @@ class ConstantLengthDataset(IterableDataset):
 
                     while len(document) > 0:
                         old_document_len = len(document)
-                        chunk_len = np_rng.randint(3072 * self.chars_per_token, (self.seq_length - 1024) * self.chars_per_token)
+                        chunk_len = np_rng.randint(
+                            3072 * self.chars_per_token,
+                            (self.seq_length - 1024) * self.chars_per_token,
+                        )
                         buffer.append(document[:chunk_len])
                         document = document[chunk_len:]
                         chunk_num += 1
                         buffer_len += len(buffer[-1])
                         if chunk_num % 50 == 0:
-                            print(f"Chunked {old_document_len-len(document)} characters from document of length {old_document_len}. Chunk number {chunk_num}.")
+                            print(
+                                f"Chunked {old_document_len-len(document)} characters from document of length {old_document_len}. Chunk number {chunk_num}."
+                            )
                             if buffer_len >= self.max_buffer_size:
                                 break
 
-                    print(f"Chunked document into {len(buffer) - old_num_chunks} chunks. Total chunks: {len(buffer)}.")
-                    
+                    print(
+                        f"Chunked document into {len(buffer) - old_num_chunks} chunks. Total chunks: {len(buffer)}."
+                    )
+
                 except StopIteration:
                     if self.infinite:
                         iterator = iter(self.dataset)
@@ -254,7 +270,9 @@ class ConstantLengthDataset(IterableDataset):
                         bos_token_id=self.bos_token_id,
                     )
 
-                all_token_ids.extend(tokenized_input + [self.eot_token_id, self.concat_token_id])
+                all_token_ids.extend(
+                    tokenized_input + [self.eot_token_id, self.concat_token_id]
+                )
             examples = []
             for i in range(0, len(all_token_ids), self.seq_length):
                 input_ids = all_token_ids[i : i + self.seq_length]
@@ -267,7 +285,7 @@ class ConstantLengthDataset(IterableDataset):
 
                 print(f"Yielding example {self.current_size}.")
                 print(self.tokenizer.decode(example))
-                
+
                 yield {
                     "input_ids": torch.LongTensor(example),
                     "labels": torch.LongTensor(example),
@@ -312,6 +330,7 @@ def create_datasets(tokenizer, args, seed):
     print(f"A sample of valid dataset: {next(iter(valid_dataset))}")
     return train_dataset, valid_dataset
 
+
 def get_mae(x, y):
     return (x - y).abs().mean()
 
@@ -323,24 +342,31 @@ def get_mse(x, y):
 def error_report(x, y):
     mae = get_mae(x, y)
     mse = get_mse(x, y)
-    print(
-        f"Mean absolute error: {mae:>8.5f}\n"
-        f"Mean squared error:  {mse:>8.5f}"
-    )
+    print(f"Mean absolute error: {mae:>8.5f}\n" f"Mean squared error:  {mse:>8.5f}")
 
-    
+
 def loftq_init(model, tokenizer, train_dataset, max_seq_length, args):
     if args.use_loftq_callback:
         compute_dtype = getattr(torch, args.bnb_4bit_compute_dtype)
-        base_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=compute_dtype)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path, torch_dtype=compute_dtype
+        )
         base_model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
-        random_input_ids = torch.randint(0, len(train_dataset), size=(1,)).numpy().tolist()
-        random_inputs = [train_dataset[i]['content'] for i in random_input_ids]
-        random_inputs = tokenizer(random_inputs, return_tensors="pt", padding=True, truncation="max_length", max_length=max_seq_length)
+        random_input_ids = (
+            torch.randint(0, len(train_dataset), size=(1,)).numpy().tolist()
+        )
+        random_inputs = [train_dataset[i]["content"] for i in random_input_ids]
+        random_inputs = tokenizer(
+            random_inputs,
+            return_tensors="pt",
+            padding=True,
+            truncation="max_length",
+            max_length=max_seq_length,
+        )
         logits_base = base_model(**random_inputs).logits
         del base_model
         gc.collect()
-        
+
         def loftq_callback(model, module_name):
             """Callable to replace weights with LoFTQ if the mse is lower than the current best one."""
             global current_mse
@@ -352,7 +378,7 @@ def loftq_init(model, tokenizer, train_dataset, max_seq_length, args):
                 return True
             print(f"MSE did not improve for module {module_name}")
             return False
-        
+
         replace_lora_weights_loftq(model, callback=loftq_callback)
         logits_loftq_callback = model(**random_inputs).logits
         error_report(logits_base, logits_loftq_callback)
@@ -432,9 +458,11 @@ def create_and_prepare_model(args, data_args, training_args):
             r=args.lora_r,
             bias="none",
             task_type="CAUSAL_LM",
-            target_modules=args.lora_target_modules.split(",")
-            if args.lora_target_modules != "all-linear"
-            else args.lora_target_modules,
+            target_modules=(
+                args.lora_target_modules.split(",")
+                if args.lora_target_modules != "all-linear"
+                else args.lora_target_modules
+            ),
         )
         model = get_peft_model(model, peft_config)
     elif args.use_peft_lora and args.use_unsloth:
@@ -444,9 +472,11 @@ def create_and_prepare_model(args, data_args, training_args):
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
             r=args.lora_r,
-            target_modules=args.lora_target_modules.split(",")
-            if args.lora_target_modules != "all-linear"
-            else args.lora_target_modules,
+            target_modules=(
+                args.lora_target_modules.split(",")
+                if args.lora_target_modules != "all-linear"
+                else args.lora_target_modules
+            ),
             use_gradient_checkpointing=training_args.gradient_checkpointing,
             random_state=training_args.seed,
             max_seq_length=data_args.max_seq_length,
@@ -491,7 +521,13 @@ def main(model_args, data_args, training_args):
 
     # LoftQ initialization when using QLoRA
     if model_args.use_4bit_quantization and model_args.use_loftq:
-        loftq_init(trainer.model, tokenizer, train_dataset, data_args.max_seq_length ,model_args)
+        loftq_init(
+            trainer.model,
+            tokenizer,
+            train_dataset,
+            data_args.max_seq_length,
+            model_args,
+        )
 
     # train
     checkpoint = None
