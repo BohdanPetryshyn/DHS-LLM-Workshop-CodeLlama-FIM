@@ -39,8 +39,14 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, replace_lora_weights_loftq
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    prepare_model_for_kbit_training,
+    replace_lora_weights_loftq,
+)
 import fim
+import functools
 
 
 # Define and parse arguments.
@@ -106,7 +112,9 @@ class ModelArguments:
     )
     use_loftq_callback: Optional[bool] = field(
         default=False,
-        metadata={"help": "Enables LoftQ callback comparing logits of base model to the ones from LoftQ init. Provides better init."},
+        metadata={
+            "help": "Enables LoftQ callback comparing logits of base model to the ones from LoftQ init. Provides better init."
+        },
     )
 
 
@@ -172,10 +180,17 @@ class ConstantLengthDataset(IterableDataset):
     ):
         self.tokenizer = tokenizer
         self.concat_token_id = tokenizer.eos_token_id
+        self.eot_token_id = tokenizer.encode(
+            tokenizer.eot_token, add_special_tokens=False
+        )[0]
         self.dataset = dataset
         self.seq_length = seq_length
         self.infinite = infinite
         self.current_size = 0
+        self.chunked_samples = 0
+        self.whole_samples = 0
+        self.not_permuted_length = 0
+        self.total_length = 0
         self.max_buffer_size = seq_length * chars_per_token * num_of_sequences
         self.content_field = content_field
         self.fim_rate = fim_rate
@@ -198,6 +213,7 @@ class ConstantLengthDataset(IterableDataset):
         iterator = iter(self.dataset)
         more_examples = True
         np_rng = np.random.RandomState(seed=self.seed)
+
         while more_examples:
             buffer, buffer_len = [], 0
             while True:
@@ -215,37 +231,136 @@ class ConstantLengthDataset(IterableDataset):
             tokenized_inputs = self.tokenizer(
                 buffer, truncation=False, add_special_tokens=False
             )["input_ids"]
-            all_token_ids = []
+            tokenized_inputs = functools.reduce(
+                # lambda x, y: x + [self.concat_token_id] + y, tokenized_inputs
+                lambda x, y: np.concatenate([x, [self.concat_token_id], y]),
+                tokenized_inputs,
+            )
 
-            for tokenized_input in tokenized_inputs:
-                # optionally do FIM permutations
-                if self.fim_rate > 0:
-                    tokenized_input, np_rng = fim.permute(
-                        tokenized_input,
-                        np_rng,
-                        self.suffix_tok_id,
-                        self.prefix_tok_id,
-                        self.middle_tok_id,
-                        self.pad_tok_id,
-                        fim_rate=self.fim_rate,
-                        fim_spm_rate=self.fim_spm_rate,
-                        truncate_or_pad=False,
-                        bos_token_id=self.bos_token_id,
-                    )
+            samples = []
 
-                all_token_ids.extend(tokenized_input + [self.concat_token_id])
-            examples = []
-            for i in range(0, len(all_token_ids), self.seq_length):
-                input_ids = all_token_ids[i : i + self.seq_length]
-                if len(input_ids) == self.seq_length:
-                    examples.append(input_ids)
+            try:
+                for i in range(0, len(tokenized_inputs), self.seq_length):
+                    sample = tokenized_inputs[i : i + self.seq_length]
+                    if len(sample) < self.seq_length:
+                        print("Skipping last short sample")
+                        break
+
+                    if self.fim_rate > 0:
+                        assert (
+                            self.fim_rate <= 1 and self.fim_rate >= 0
+                        ), "FIM rate must be a probability 0 <= rate <= 1"
+
+                        segment_breaks = np.argwhere(
+                            sample == self.concat_token_id
+                        )  # split sample by document
+
+                        if segment_breaks.shape[0] > 0:
+                            self.chunked_samples += 1
+                            curr_start_position = 0
+                            new_samples = []
+                            for loc in np.nditer(segment_breaks):
+                                # Only permute non-empty segments.
+                                if loc - curr_start_position > 0:
+                                    # permute {prefix, suffix, middle} or {suffix, prefix, middle}
+                                    permuted, np_rng = fim.permute_char_level(
+                                        sample[curr_start_position:loc],
+                                        np_rng,
+                                        self.fim_rate,
+                                        self.fim_spm_rate,
+                                        self.suffix_tok_id,
+                                        self.prefix_tok_id,
+                                        self.middle_tok_id,
+                                        self.pad_tok_id,
+                                        self.tokenizer,
+                                    )
+                                    new_samples += [
+                                        [self.bos_token_id],
+                                        permuted,
+                                        [self.eot_token_id, self.concat_token_id],
+                                    ]
+
+                                curr_start_position = loc + 1  # jump over the EOD token
+                            # Permute the segment after the last EOD
+                            last_chunk = sample[curr_start_position:]
+                            # The last chunk will be truncated after so we'll get a bad example
+                            self.not_permuted_length += last_chunk.shape[0]
+                            # permuted, np_rng = fim.permute_char_level(
+                            #     last_chunk,
+                            #     np_rng,
+                            #     self.fim_rate,
+                            #     self.fim_spm_rate,
+                            #     self.suffix_tok_id,
+                            #     self.prefix_tok_id,
+                            #     self.middle_tok_id,
+                            #     self.pad_tok_id,
+                            #     self.tokenizer,
+                            # )
+                            # new_samples += [
+                            #     [self.bos_token_id],
+                            #     permuted,
+                            #     [self.eot_token_id, self.concat_token_id],
+                            # ]
+                            new_samples += [
+                                [self.bos_token_id],
+                                last_chunk,
+                            ]
+
+                            sample = np.concatenate(new_samples)
+                        else:
+                            self.whole_samples += 1
+                            old_sample_length = sample.shape[0]
+                            permuted, np_rng = fim.permute_char_level(
+                                sample,
+                                np_rng,
+                                self.fim_rate,
+                                self.fim_spm_rate,
+                                self.suffix_tok_id,
+                                self.prefix_tok_id,
+                                self.middle_tok_id,
+                                self.pad_tok_id,
+                                self.tokenizer,
+                                truncate_or_pad=3,
+                            )
+                            sample = np.concatenate(
+                                [
+                                    [self.bos_token_id],
+                                    permuted,
+                                    [self.eot_token_id, self.concat_token_id],
+                                ]
+                            )
+                            if sample.shape[0] != old_sample_length:
+                                print(
+                                    f"Whole sample permutation error. Length doesn't match. Old: {old_sample_length}, new: {sample.shape[0]}"
+                                )
+
+                    # Truncate or pad sequence to max-length
+                    diff = sample.shape[0] - self.seq_length
+                    if diff > 0:  # too long
+                        sample = sample[: self.seq_length]
+                    elif diff < 0:  # too short
+                        sample = np.concatenate(
+                            [sample, np.full((-1 * diff), self.pad_tok_id)]
+                        )
+
+                    samples.append(sample)
+                    self.total_length += sample.shape[0]
+            except:
+                print("Error in sample generation")
+
             if self.shuffle:
-                random.shuffle(examples)
-            for example in examples:
+                random.shuffle(samples)
+            for sample in samples:
                 self.current_size += 1
+                if (self.current_size % 1000) == 0:
+                    print(f"Current size: {self.current_size}")
+                    print(f"Chunked samples: {self.chunked_samples}")
+                    print(f"Whole samples: {self.whole_samples}")
+                    print(f"Not permuted length: {self.not_permuted_length}")
+                    print(f"Total length: {self.total_length}")
                 yield {
-                    "input_ids": torch.LongTensor(example),
-                    "labels": torch.LongTensor(example),
+                    "input_ids": torch.LongTensor(sample),
+                    "labels": torch.LongTensor(sample),
                 }
 
 
@@ -260,6 +375,7 @@ def create_datasets(tokenizer, args, seed):
         f"Size of the train set: {len(train_data)}. Size of the validation set: {len(valid_data)}"
     )
     chars_per_token = chars_token_ratio(train_data, tokenizer, args.dataset_text_field)
+    # chars_per_token = 4
     print(f"The character to token ratio of the dataset is: {chars_per_token:.2f}")
     train_dataset = ConstantLengthDataset(
         tokenizer,
@@ -287,6 +403,7 @@ def create_datasets(tokenizer, args, seed):
     print(f"A sample of valid dataset: {next(iter(valid_dataset))}")
     return train_dataset, valid_dataset
 
+
 def get_mae(x, y):
     return (x - y).abs().mean()
 
@@ -298,24 +415,31 @@ def get_mse(x, y):
 def error_report(x, y):
     mae = get_mae(x, y)
     mse = get_mse(x, y)
-    print(
-        f"Mean absolute error: {mae:>8.5f}\n"
-        f"Mean squared error:  {mse:>8.5f}"
-    )
+    print(f"Mean absolute error: {mae:>8.5f}\n" f"Mean squared error:  {mse:>8.5f}")
 
-    
+
 def loftq_init(model, tokenizer, train_dataset, max_seq_length, args):
     if args.use_loftq_callback:
         compute_dtype = getattr(torch, args.bnb_4bit_compute_dtype)
-        base_model = AutoModelForCausalLM.from_pretrained(args.model_name_or_path, torch_dtype=compute_dtype)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path, torch_dtype=compute_dtype
+        )
         base_model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
-        random_input_ids = torch.randint(0, len(train_dataset), size=(1,)).numpy().tolist()
-        random_inputs = [train_dataset[i]['content'] for i in random_input_ids]
-        random_inputs = tokenizer(random_inputs, return_tensors="pt", padding=True, truncation="max_length", max_length=max_seq_length)
+        random_input_ids = (
+            torch.randint(0, len(train_dataset), size=(1,)).numpy().tolist()
+        )
+        random_inputs = [train_dataset[i]["content"] for i in random_input_ids]
+        random_inputs = tokenizer(
+            random_inputs,
+            return_tensors="pt",
+            padding=True,
+            truncation="max_length",
+            max_length=max_seq_length,
+        )
         logits_base = base_model(**random_inputs).logits
         del base_model
         gc.collect()
-        
+
         def loftq_callback(model, module_name):
             """Callable to replace weights with LoFTQ if the mse is lower than the current best one."""
             global current_mse
@@ -327,7 +451,7 @@ def loftq_init(model, tokenizer, train_dataset, max_seq_length, args):
                 return True
             print(f"MSE did not improve for module {module_name}")
             return False
-        
+
         replace_lora_weights_loftq(model, callback=loftq_callback)
         logits_loftq_callback = model(**random_inputs).logits
         error_report(logits_base, logits_loftq_callback)
@@ -407,9 +531,11 @@ def create_and_prepare_model(args, data_args, training_args):
             r=args.lora_r,
             bias="none",
             task_type="CAUSAL_LM",
-            target_modules=args.lora_target_modules.split(",")
-            if args.lora_target_modules != "all-linear"
-            else args.lora_target_modules,
+            target_modules=(
+                args.lora_target_modules.split(",")
+                if args.lora_target_modules != "all-linear"
+                else args.lora_target_modules
+            ),
         )
         model = get_peft_model(model, peft_config)
     elif args.use_peft_lora and args.use_unsloth:
@@ -419,9 +545,11 @@ def create_and_prepare_model(args, data_args, training_args):
             lora_alpha=args.lora_alpha,
             lora_dropout=args.lora_dropout,
             r=args.lora_r,
-            target_modules=args.lora_target_modules.split(",")
-            if args.lora_target_modules != "all-linear"
-            else args.lora_target_modules,
+            target_modules=(
+                args.lora_target_modules.split(",")
+                if args.lora_target_modules != "all-linear"
+                else args.lora_target_modules
+            ),
             use_gradient_checkpointing=training_args.gradient_checkpointing,
             random_state=training_args.seed,
             max_seq_length=data_args.max_seq_length,
@@ -466,7 +594,13 @@ def main(model_args, data_args, training_args):
 
     # LoftQ initialization when using QLoRA
     if model_args.use_4bit_quantization and model_args.use_loftq:
-        loftq_init(trainer.model, tokenizer, train_dataset, data_args.max_seq_length ,model_args)
+        loftq_init(
+            trainer.model,
+            tokenizer,
+            train_dataset,
+            data_args.max_seq_length,
+            model_args,
+        )
 
     # train
     checkpoint = None
