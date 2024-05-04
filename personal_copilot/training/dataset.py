@@ -1,3 +1,4 @@
+import traceback
 import numpy as np
 from torch.utils.data import IterableDataset
 import fim
@@ -205,8 +206,9 @@ class ConstantLengthDataset(IterableDataset):
 
                     samples.append(sample)
                     self.total_length += sample.shape[0]
-            except:
-                print("Error in sample generation")
+            except Exception as e:
+                print(f"Error in sample generation: {str(e)}")
+                traceback.print_exc()
 
             if self.shuffle:
                 random.shuffle(samples)
@@ -242,7 +244,7 @@ if __name__ == "__main__":
 
     num_samples = 0
 
-    for sample in tqdm(train_dataset):
+    for sample in train_dataset:
         if num_samples % 100 == 0:
             print(f"Samples generated: {num_samples}")
 

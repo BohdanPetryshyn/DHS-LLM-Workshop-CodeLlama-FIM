@@ -141,6 +141,10 @@ def permute(
     return list(new_sample), np_rng
 
 
+successful_fim = 0
+failed_fim = 0
+
+
 def permute_char_level(
     sample,
     np_rng,
@@ -157,6 +161,7 @@ def permute_char_level(
     Take in a sample (np array w/ size (0,chunklength)) and perform a FIM transformation on it.
     Maintain the same sample length (if transform creates a few extra tokens, drop them).
     """
+    global successful_fim, failed_fim
 
     if np_rng.binomial(1, fim_rate):  # sample bernoulli dist
 
@@ -177,15 +182,38 @@ def permute_char_level(
         middle = contents[boundaries[0] : boundaries[1]]
         suffix = contents[boundaries[1] :]
 
+        # By adding and removing the <MID> token, we ensure that the tokenizer doesn't add extra leading whitespace
+        # The prefix whitespace doesn't matter as also mentioned in the Code Llama paper
+        special_token = "▔"
+        special_token_id = tokenizer.encode(
+            special_token, add_special_tokens=False, return_tensors="np"
+        )[0]
+        special_token_id_len = special_token_id.shape[0]
+
         prefix = tokenizer.encode(
             prefix, add_special_tokens=False, return_tensors="np"
         )[0]
         middle = tokenizer.encode(
-            middle, add_special_tokens=False, return_tensors="np"
-        )[0]
+            special_token + middle, add_special_tokens=False, return_tensors="np"
+        )[0][special_token_id_len:]
         suffix = tokenizer.encode(
-            suffix, add_special_tokens=False, return_tensors="np"
-        )[0]
+            special_token + suffix, add_special_tokens=False, return_tensors="np"
+        )[0][special_token_id_len:]
+
+        # Remove after debugging
+        # if tokenizer.decode(np.concatenate([prefix, middle, suffix])) != contents:
+        #     # print(
+        #     #     "Error in FIM transformation: ",
+        #     #     tokenizer.decode(np.concatenate([prefix, middle, suffix])),
+        #     #     " != ",
+        #     #     contents,
+        #     # )
+        #     failed_fim += 1
+        #     print("Failed FIM transformations: ", failed_fim)
+
+        # else:
+        #     successful_fim += 1
+        #     print("Successful FIM transformations: ", successful_fim)
 
         # here we truncate each given segment to fit the same length as it was before
         # A consequence is that we never reach the end of a file?
