@@ -7,7 +7,8 @@ import torch
 import random
 from transformers import AutoTokenizer
 from datasets import load_dataset
-from tqdm import tqdm
+
+DOCUMENT_SPLIT_RATE = 0.75
 
 
 class ConstantLengthDataset(IterableDataset):
@@ -52,6 +53,7 @@ class ConstantLengthDataset(IterableDataset):
         self.whole_samples = 0
         self.not_permuted_length = 0
         self.total_length = 0
+        self.chars_per_token = chars_per_token
         self.max_buffer_size = seq_length * chars_per_token * num_of_sequences
         self.content_field = content_field
         self.fim_rate = fim_rate
@@ -81,8 +83,32 @@ class ConstantLengthDataset(IterableDataset):
                 if buffer_len >= self.max_buffer_size:
                     break
                 try:
-                    buffer.append(next(iterator)[self.content_field])
-                    buffer_len += len(buffer[-1])
+                    document = next(iterator)[self.content_field]
+
+                    if np_rng.binomial(1, 1 - DOCUMENT_SPLIT_RATE):
+                        buffer.append(document)
+                        buffer_len += len(document)
+                        print(f"Added document to buffer. Total length: {buffer_len}")
+                        continue
+
+                    old_num_chunks = len(buffer)
+                    chunk_num = 0
+
+                    while len(document) > 0:
+                        chunk_len = np_rng.randint(
+                            round(self.seq_length * 0.6) * self.chars_per_token,
+                            round(self.seq_length * 0.8) * self.chars_per_token,
+                        )
+                        buffer.append(document[:chunk_len])
+                        document = document[chunk_len:]
+                        chunk_num += 1
+                        buffer_len += len(buffer[-1])
+                        if buffer_len >= self.max_buffer_size:
+                            break
+
+                    print(
+                        f"Chunked document into {len(buffer) - old_num_chunks} chunks. Total chunks: {len(buffer)}."
+                    )
                 except StopIteration:
                     if self.infinite:
                         iterator = iter(self.dataset)
@@ -93,7 +119,6 @@ class ConstantLengthDataset(IterableDataset):
                 buffer, truncation=False, add_special_tokens=False
             )["input_ids"]
             tokenized_inputs = functools.reduce(
-                # lambda x, y: x + [self.concat_token_id] + y, tokenized_inputs
                 lambda x, y: np.concatenate([x, [self.concat_token_id], y]),
                 tokenized_inputs,
             )
@@ -228,7 +253,9 @@ class ConstantLengthDataset(IterableDataset):
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
-    dataset = load_dataset("BohdanPetryshyn/openapi-completion", split="train")
+    dataset = load_dataset(
+        "BohdanPetryshyn/openapi-completion-deduplicated", split="train"
+    )
     train_dataset = ConstantLengthDataset(
         tokenizer,
         dataset,
