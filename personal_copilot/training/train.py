@@ -124,6 +124,7 @@ class DataTrainingArguments:
         default="text", metadata={"help": "Dataset field to use as input text."}
     )
     max_seq_length: Optional[int] = field(default=4096)
+    num_of_sequences: Optional[int] = field(default=1024)
     test_size: Optional[float] = field(default=0.1)
     fim_rate: Optional[float] = field(default=0.5)
     fim_spm_rate: Optional[float] = field(default=0.5)
@@ -163,6 +164,7 @@ def create_datasets(tokenizer, args, seed):
         train_data,
         infinite=True,
         seq_length=args.max_seq_length,
+        num_of_sequences=args.num_of_sequences,
         chars_per_token=chars_per_token,
         content_field=args.dataset_text_field,
         fim_rate=args.fim_rate,
@@ -175,6 +177,7 @@ def create_datasets(tokenizer, args, seed):
         valid_data,
         infinite=False,
         seq_length=args.max_seq_length,
+        num_of_sequences=args.num_of_sequences,
         chars_per_token=chars_per_token,
         content_field=args.dataset_text_field,
         fim_rate=args.fim_rate,

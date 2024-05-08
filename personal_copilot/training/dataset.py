@@ -79,30 +79,55 @@ class ConstantLengthDataset(IterableDataset):
             buffer, buffer_len = [], 0
             while True:
                 if buffer_len >= self.max_buffer_size:
+                    print("Buffer full, stopping. Current buffer size: ", len(buffer))
                     break
+                if (len(buffer) % 100) == 0:
+                    print("Filling buffer. Current buffer size: ", len(buffer))
                 try:
                     buffer.append(next(iterator)[self.content_field])
                     buffer_len += len(buffer[-1])
                 except StopIteration:
                     if self.infinite:
                         iterator = iter(self.dataset)
+                        print(
+                            "Dataset exhausted, resetting iterator. Current buffer size: ",
+                            len(buffer),
+                        )
+                        break  # Still stop filling the buffer if the dataset is exhausted
                     else:
                         more_examples = False
+                        print(
+                            "Dataset exhausted, stopping. Current buffer size: ",
+                            len(buffer),
+                        )
                         break
+            print("Tokenizing buffer.")
             tokenized_inputs = self.tokenizer(
                 buffer, truncation=False, add_special_tokens=False
             )["input_ids"]
-            tokenized_inputs = functools.reduce(
-                # lambda x, y: x + [self.concat_token_id] + y, tokenized_inputs
-                lambda x, y: np.concatenate([x, [self.concat_token_id], y]),
-                tokenized_inputs,
+            print("Concatenating tokenized inputs.")
+            tokenized_inputs = (
+                np.array(tokenized_inputs[0])
+                if len(tokenized_inputs) == 1
+                else functools.reduce(
+                    # lambda x, y: x + [self.concat_token_id] + y, tokenized_inputs
+                    lambda x, y: np.concatenate([x, [self.concat_token_id], y]),
+                    tokenized_inputs,
+                )
             )
 
             samples = []
 
+            print("Generating samples.")
             try:
                 for i in range(0, len(tokenized_inputs), self.seq_length):
                     sample = tokenized_inputs[i : i + self.seq_length]
+
+                    if len(samples) % 100 == 0:
+                        print(
+                            "Generating samples. Current samples size: ", len(samples)
+                        )
+
                     if len(sample) < self.seq_length:
                         print("Skipping last short sample")
                         break
@@ -228,12 +253,15 @@ class ConstantLengthDataset(IterableDataset):
 
 if __name__ == "__main__":
     tokenizer = AutoTokenizer.from_pretrained("codellama/CodeLlama-7b-hf")
-    dataset = load_dataset("BohdanPetryshyn/openapi-completion", split="train")
+    dataset = load_dataset(
+        "BohdanPetryshyn/openapi-completion-deduplicated", split="train"
+    )
     train_dataset = ConstantLengthDataset(
         tokenizer,
         dataset,
         infinite=False,
-        seq_length=5120,
+        seq_length=1024,
+        num_of_sequences=512,
         chars_per_token=4,
         content_field="content",
         fim_rate=0.8,
@@ -245,9 +273,8 @@ if __name__ == "__main__":
     num_samples = 0
 
     for sample in train_dataset:
-        if num_samples % 100 == 0:
-            print(f"Samples generated: {num_samples}")
-
         num_samples += 1
+
+        print(f"Samples generated: {num_samples}")
 
     print(f"Total samples generated: {num_samples}")
