@@ -8,7 +8,7 @@ import random
 from transformers import AutoTokenizer
 from datasets import load_dataset
 
-DOCUMENT_SPLIT_RATE = 0.75
+DOCUMENT_SPLIT_RATE = 1
 
 
 class ConstantLengthDataset(IterableDataset):
@@ -96,8 +96,8 @@ class ConstantLengthDataset(IterableDataset):
 
                     while len(document) > 0:
                         chunk_len = np_rng.randint(
-                            round(self.seq_length * 0.6) * self.chars_per_token,
                             round(self.seq_length * 0.8) * self.chars_per_token,
+                            round(self.seq_length * 1.2) * self.chars_per_token,
                         )
                         buffer.append(document[:chunk_len])
                         document = document[chunk_len:]
